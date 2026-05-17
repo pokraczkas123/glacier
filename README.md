@@ -66,35 +66,6 @@ command *
 command *!Nick1,Nick2
 ```
 
-## Event Listeners
-- **EntityDamageByEntityEvent** - Handles hitpush, nohit, dmgmult, reversehit
-- **PlayerAttemptPickupItemEvent** - Handles noitempickup
-- **PlayerItemConsumeEvent** - Handles infeat
-- **BlockPlaceEvent** - Handles ghostplace, build
-- **BlockBreakEvent** - Handles build
-- **PlayerDropItemEvent** - Handles flyingitemdrops
-
-## Global State Tables
-- `hitpushPlayers` - Hitpush toggle state
-- `nohitPlayers` - Nohit toggle state
-- `dmgmultPlayers` - Damage multiplier settings
-- `ridePairs` - Ride pairings
-- `rideTasks` - Ride task IDs
-- `noPickupPlayers` - No item pickup toggle state
-- `swingPlayers` - Swing hand toggle state
-- `swingTasks` - Swing hand task IDs
-- `infeatPlayers` - Infinite eating toggle state
-- `freezecamPlayers` - Freeze cam toggle state
-- `freezecamTasks` - Freeze cam task IDs
-- `ghostPlacePlayers` - Ghost place toggle state
-- `flyingDropPlayers` - Flying item drops toggle state
-- `reversehitPlayers` - Reverse hit toggle state
-- `randomslotTasks` - Random slot task IDs
-- `faketimeoutTasks` - Fake timeout task IDs
-- `faketimeoutItems` - Fake timeout saved items
-- `soundbugTasks` - Sound bug task IDs
-- `buildPlayers` - Build mode toggle state
-
 ## Color Formatting
 - Use `&` for color codes in messages (e.g., `&a` for green, `&c` for red)
 - Automatically converted to Minecraft `§` format where needed
