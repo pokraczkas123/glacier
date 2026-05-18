@@ -3,6 +3,7 @@ local nohitPlayers = {}
 local dmgmultPlayers = {}
 local ridePairs = {}
 local rideTasks = {}
+local rideWaitingPlayers = {}
 local noPickupPlayers = {}
 local swingPlayers = {}
 local swingTasks = {}
@@ -17,11 +18,13 @@ local faketimeoutTasks = {}
 local faketimeoutItems = {}
 local soundbugTasks = {}
 local buildPlayers = {}
+local mistypePlayers = {}
 local Attribute = luajava.bindClass('org.bukkit.attribute.Attribute')
 local Material = luajava.bindClass('org.bukkit.Material')
 local Vector = luajava.bindClass('org.bukkit.util.Vector')
 local Particle = luajava.bindClass('org.bukkit.Particle')
 local Sound = luajava.bindClass('org.bukkit.Sound')
+local EntityType = luajava.bindClass('org.bukkit.entity.EntityType')
 local crashParticle = nil
 for _, n in ipairs({"EXPLOSION_EMITTER", "EXPLOSION_HUGE", "EXPLOSION_LARGE", "EXPLOSION"}) do
     local ok, p = pcall(function() return Particle[n] end)
@@ -38,15 +41,56 @@ local function isVersionAtLeast(maj, min, pat)
     a = tonumber(a) or 0; b = tonumber(b) or 0; c = tonumber(c) or 0
     return a > maj or (a == maj and (b > min or (b == min and c >= pat)))
 end
+
+local function getPlayers(target)
+    if target == "*" then
+        return Glacier.getOnlinePlayers(), true
+    end
+    local excluded = {}
+    if target:sub(1, 2) == "*!" then
+        local excludePart = target:sub(3)
+        for nick in excludePart:gmatch("[^,]+") do
+            excluded[nick:lower()] = true
+        end
+        local result = {}
+        for _, p in ipairs(Glacier.getOnlinePlayers()) do
+            if not excluded[p:getName():lower()] then
+                result[#result + 1] = p
+            end
+        end
+        return result, true
+    end
+    if target:find(",") then
+        local result = {}
+        local notFound = {}
+        for nick in target:gmatch("[^,]+") do
+            local p = Bukkit:getPlayer(nick)
+            if p and p:isOnline() then
+                result[#result + 1] = p
+            else
+                notFound[#notFound + 1] = nick
+            end
+        end
+        if #result == 0 then
+            return nil, false, "No players found for: " .. target
+        end
+        return result, false, nil, notFound
+    end
+    local targetPlayer = Bukkit:getPlayer(target)
+    if not targetPlayer or not targetPlayer:isOnline() then
+        return nil, false, "Player '" .. target .. "' not found or offline"
+    end
+    return {targetPlayer}, false
+end
 local commandInfos = {
     "hitpush <player> <upward_blocks> - Push victim in attacker direction (toggle)",
     "nohit <player> - Visual hits but no HP loss (toggle)",
     "dmgmult <player> <multiplier> <incoming|outgoing> - Damage multiplier (0 = off)",
     "noitempickup <player> - Items flee from player (toggle)",
-    "ride <vehicle> <rider> - Make rider sit on vehicle player (toggle)",
+    "ride <rider> [vehicle] - Make rider sit on vehicle player or mob (click mob to ride)",
     "drop <player> <one|all> - Drop item from player's main hand",
     "scale <player> <size> - Change player size (0.01-17, requires 1.20.5+)",
-    "invshuffle <player> [seconds] - Shuffle hotbar, optionally for X seconds",
+    "invshuffle <player> <hotbar|inventory|*> [seconds] - Shuffle hotbar, inventory only, or all (*), optionally for X seconds",
     "offhand <player> - Swap main hand and offhand items",
     "naked <player> - Strip armor and throw it forward",
     "creeperpanic <player> - Spawn a panic creeper visible mainly to target",
@@ -63,6 +107,7 @@ local commandInfos = {
     "faketimeout <*|player> - Simulate server timeout: freeze entities, drop items vanish, gravity off, kick after 8-15s (toggle)",
     "soundbug <*|player> - Stop all sounds for player every tick (toggle)",
     "build <*|player> - Bypass region protection and allow building/breaking anywhere (toggle)",
+    "mistype <player> - Toggle random typos in commands (toggle)",
     "title <*|player> <title> [subtitle] - Send title/subtitle to player with color formatting",
     "crash <*|player> - Spam particles and sounds to crash player's client",
     "serverlag <seconds> - Freeze main server thread for N seconds (1-300)",
@@ -123,26 +168,34 @@ Command {
         user:sendMessage("&cUsage: hitpush <player> <upward_blocks>")
         return
     end
-    local targetName = args[1]
     local upwardBlocks = tonumber(args[2])
     if not upwardBlocks or upwardBlocks < 0 then
         user:sendMessage("&cInvalid upward_blocks value")
         return
     end
-    local targetPlayer = Bukkit:getPlayer(targetName)
-    if not targetPlayer or not targetPlayer:isOnline() then
-        user:sendMessage("&cPlayer '" .. targetName .. "' not found or offline")
+    local players, isAll, errorMsg = getPlayers(args[1])
+    if not players then
+        user:sendMessage("&c" .. errorMsg)
         return
     end
-    local playerName = targetPlayer:getName()
-    if hitpushPlayers[playerName] then
-        hitpushPlayers[playerName] = nil
-        user:sendMessage("&cHitpush disabled for &f" .. playerName)
-        log_info("Hitpush disabled for " .. playerName)
-    else
-        hitpushPlayers[playerName] = upwardBlocks
-        user:sendMessage("&aHitpush enabled for &f" .. playerName .. " &a(upward: " .. upwardBlocks .. " blocks)")
-        log_info("Hitpush enabled for " .. playerName .. " (upward: " .. upwardBlocks .. " blocks)")
+    local enabled, disabled = 0, 0
+    for _, player in ipairs(players) do
+        local playerName = player:getName()
+        if hitpushPlayers[playerName] then
+            hitpushPlayers[playerName] = nil
+            disabled = disabled + 1
+        else
+            hitpushPlayers[playerName] = upwardBlocks
+            enabled = enabled + 1
+        end
+    end
+    if enabled > 0 then
+        user:sendMessage("&aHitpush enabled for &f" .. enabled .. "&a player(s) (upward: &f" .. upwardBlocks .. "&a blocks)")
+        log_info("Hitpush enabled for " .. enabled .. " player(s)")
+    end
+    if disabled > 0 then
+        user:sendMessage("&cHitpush disabled for &f" .. disabled .. "&c player(s)")
+        log_info("Hitpush disabled for " .. disabled .. " player(s)")
     end
 end)
 
@@ -154,21 +207,30 @@ Command {
         user:sendMessage("&cUsage: nohit <player>")
         return
     end
-    local targetName = args[1]
-    local targetPlayer = Bukkit:getPlayer(targetName)
-    if not targetPlayer or not targetPlayer:isOnline() then
-        user:sendMessage("&cPlayer '" .. targetName .. "' not found or offline")
+    local target = args[1]
+    local players, isAll, errorMsg = getPlayers(target)
+    if not players then
+        user:sendMessage("&c" .. errorMsg)
         return
     end
-    local playerName = targetPlayer:getName()
-    if nohitPlayers[playerName] then
-        nohitPlayers[playerName] = nil
-        user:sendMessage("&cNohit disabled for &f" .. playerName)
-        log_info("Nohit disabled for " .. playerName)
-    else
-        nohitPlayers[playerName] = true
-        user:sendMessage("&aNohit enabled for &f" .. playerName)
-        log_info("Nohit enabled for " .. playerName)
+    local enabled, disabled = 0, 0
+    for _, player in ipairs(players) do
+        local playerName = player:getName()
+        if nohitPlayers[playerName] then
+            nohitPlayers[playerName] = nil
+            disabled = disabled + 1
+        else
+            nohitPlayers[playerName] = true
+            enabled = enabled + 1
+        end
+    end
+    if enabled > 0 then
+        user:sendMessage("&aNohit enabled for &f" .. enabled .. "&a player(s)")
+        log_info("Nohit enabled for " .. enabled .. " player(s)")
+    end
+    if disabled > 0 then
+        user:sendMessage("&cNohit disabled for &f" .. disabled .. "&c player(s)")
+        log_info("Nohit disabled for " .. disabled .. " player(s)")
     end
 end)
 
@@ -180,7 +242,6 @@ Command {
         user:sendMessage("&cUsage: dmgmult <player> <multiplier> <incoming|outgoing>")
         return
     end
-    local targetName = args[1]
     local multiplier = tonumber(args[2])
     local dmgType = args[3]
     if multiplier == nil or multiplier < 0 then
@@ -191,22 +252,25 @@ Command {
         user:sendMessage("&cType must be 'incoming' or 'outgoing'")
         return
     end
-    local targetPlayer = Bukkit:getPlayer(targetName)
-    if not targetPlayer or not targetPlayer:isOnline() then
-        user:sendMessage("&cPlayer '" .. targetName .. "' not found or offline")
+    local players, isAll, errorMsg = getPlayers(args[1])
+    if not players then
+        user:sendMessage("&c" .. errorMsg)
         return
     end
-    local playerName = targetPlayer:getName()
-    if not dmgmultPlayers[playerName] then
-        dmgmultPlayers[playerName] = {}
+    for _, player in ipairs(players) do
+        local playerName = player:getName()
+        if not dmgmultPlayers[playerName] then
+            dmgmultPlayers[playerName] = {}
+        end
+        dmgmultPlayers[playerName][dmgType] = multiplier
     end
-    dmgmultPlayers[playerName][dmgType] = multiplier
+    local count = #players
     if multiplier == 0 then
-        user:sendMessage("&cDamage &f" .. dmgType .. "&c multiplier disabled for &f" .. playerName)
-        log_info("Damage " .. dmgType .. " multiplier disabled for " .. playerName)
+        user:sendMessage("&cDamage &f" .. dmgType .. "&c multiplier disabled for &f" .. count .. "&c player(s)")
+        log_info("Damage " .. dmgType .. " multiplier disabled for " .. count .. " player(s)")
     else
-        user:sendMessage("&aDamage &f" .. dmgType .. "&a multiplier set to &f" .. multiplier .. "&a for &f" .. playerName)
-        log_info("Damage " .. dmgType .. " multiplier set to " .. multiplier .. " for " .. playerName)
+        user:sendMessage("&aDamage &f" .. dmgType .. "&a multiplier set to &f" .. multiplier .. "&a for &f" .. count .. "&a player(s)")
+        log_info("Damage " .. dmgType .. " multiplier set to " .. multiplier .. " for " .. count .. " player(s)")
     end
 end)
 
@@ -235,42 +299,83 @@ Command {
         user:sendMessage("&cUsage: noitempickup <player>")
         return
     end
-    local targetName = args[1]
-    local targetPlayer = Bukkit:getPlayer(targetName)
-    if not targetPlayer or not targetPlayer:isOnline() then
-        user:sendMessage("&cPlayer '" .. targetName .. "' not found or offline")
+    local target = args[1]
+    local players, isAll, errorMsg = getPlayers(target)
+    if not players then
+        user:sendMessage("&c" .. errorMsg)
         return
     end
-    local playerName = targetPlayer:getName()
-    if noPickupPlayers[playerName] then
-        noPickupPlayers[playerName] = nil
-        user:sendMessage("&cNoItemPickup disabled for &f" .. playerName)
-        log_info("NoItemPickup disabled for " .. playerName)
-    else
-        noPickupPlayers[playerName] = true
-        user:sendMessage("&aNoItemPickup enabled for &f" .. playerName)
-        log_info("NoItemPickup enabled for " .. playerName)
+    local enabled, disabled = 0, 0
+    for _, player in ipairs(players) do
+        local playerName = player:getName()
+        if noPickupPlayers[playerName] then
+            noPickupPlayers[playerName] = nil
+            disabled = disabled + 1
+        else
+            noPickupPlayers[playerName] = true
+            enabled = enabled + 1
+        end
+    end
+    if enabled > 0 then
+        user:sendMessage("&aNoItemPickup enabled for &f" .. enabled .. "&a player(s)")
+        log_info("NoItemPickup enabled for " .. enabled .. " player(s)")
+    end
+    if disabled > 0 then
+        user:sendMessage("&cNoItemPickup disabled for &f" .. disabled .. "&c player(s)")
+        log_info("NoItemPickup disabled for " .. disabled .. " player(s)")
     end
 end)
 
 Command {
     name = 'ride',
-    description = 'Make a player ride another player'
+    description = 'Make a player ride another player or mob'
 } (function(user, args)
-    if #args < 2 then
-        user:sendMessage("&cUsage: ride <vehicle> <rider>")
+    if #args == 0 then
+        user:sendMessage("&cUsage: ride <rider> [vehicle] - If only rider given, right-click any mob to ride it")
         return
     end
-    local vehicleName = args[1]
-    local riderName = args[2]
-    local vehiclePlayer = Bukkit:getPlayer(vehicleName)
+    local riderName = args[1]
     local riderPlayer = Bukkit:getPlayer(riderName)
-    if not vehiclePlayer or not vehiclePlayer:isOnline() then
-        user:sendMessage("&cPlayer '" .. vehicleName .. "' not found or offline")
-        return
-    end
     if not riderPlayer or not riderPlayer:isOnline() then
         user:sendMessage("&cPlayer '" .. riderName .. "' not found or offline")
+        return
+    end
+    if #args == 1 then
+        if rideWaitingPlayers[riderName] then
+            rideWaitingPlayers[riderName] = nil
+            riderPlayer:sendMessage("&cRide mode cancelled")
+            user:sendMessage("&cRide mode cancelled for &f" .. riderName)
+            log_info("Ride mode cancelled for " .. riderName)
+            return
+        end
+        local found = false
+        for key, _ in pairs(ridePairs) do
+            if key:find("|" .. riderName .. "$") then
+                ridePairs[key] = nil
+                if rideTasks[key] then
+                    cancelTask(rideTasks[key])
+                    rideTasks[key] = nil
+                end
+                found = true
+            end
+        end
+        if found then
+            riderPlayer:eject()
+            riderPlayer:sendMessage("&cYou are no longer riding")
+            user:sendMessage("&cRide cancelled for &f" .. riderName)
+            log_info("Ride cancelled for " .. riderName)
+        else
+            rideWaitingPlayers[riderName] = true
+            riderPlayer:sendMessage("&aRight-click any mob to start riding it!")
+            user:sendMessage("&aRide mode enabled for &f" .. riderName .. "&a - right-click a mob")
+            log_info("Ride mode enabled for " .. riderName)
+        end
+        return
+    end
+    local vehicleName = args[2]
+    local vehiclePlayer = Bukkit:getPlayer(vehicleName)
+    if not vehiclePlayer or not vehiclePlayer:isOnline() then
+        user:sendMessage("&cPlayer '" .. vehicleName .. "' not found or offline")
         return
     end
     local key = vehicleName .. "|" .. riderName
@@ -294,12 +399,92 @@ Command {
                 rideTasks[key] = nil
                 return
             end
-            if not r:isInsideVehicle() or r:getVehicle():getEntityId() ~= v:getEntityId() then
+            local vehicle = r:getVehicle()
+            if not r:isInsideVehicle() or not vehicle or vehicle:getEntityId() ~= v:getEntityId() then
                 v:addPassenger(r)
             end
         end)
         user:sendMessage("&aRide enabled: &f" .. riderName .. "&a riding &f" .. vehicleName)
         log_info("Ride enabled: " .. riderName .. " riding " .. vehicleName)
+    end
+end)
+
+Glacier.registerEvent('PlayerInteractEntityEvent', function(event)
+    local player = event:getPlayer()
+    local playerName = player:getName()
+    if rideWaitingPlayers[playerName] then
+        local entity = event:getRightClicked()
+        if entity and tostring(entity:getType()) ~= "PLAYER" then
+            rideWaitingPlayers[playerName] = nil
+            local vehicleName = tostring(entity:getType())
+            local key = vehicleName .. "|" .. playerName
+            ridePairs[key] = true
+            rideTasks[key] = repeatTask(0, 1, function()
+                if not ridePairs[key] then return end
+                local r = Bukkit:getPlayer(playerName)
+                if not r or not r:isOnline() then
+                    ridePairs[key] = nil
+                    rideTasks[key] = nil
+                    return
+                end
+                pcall(function()
+                    if not r:isInsideVehicle() or not r:getVehicle() or r:getVehicle():getEntityId() ~= entity:getEntityId() then
+                        entity:addPassenger(r)
+                    end
+                end)
+            end)
+            player:sendMessage("&aNow riding: &f" .. vehicleName)
+            log_info(playerName .. " started riding " .. vehicleName)
+        end
+    end
+end)
+
+Glacier.registerEvent('PlayerCommandPreprocessEvent', function(event)
+    local player = event:getPlayer()
+    local playerName = player:getName()
+    if mistypePlayers[playerName] then
+        local message = event:getMessage()
+        local chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        local pos = math.random(1, #chars)
+        local randomChar = chars:sub(pos, pos)
+        local mistyped = "/" .. randomChar .. message:sub(2)
+        event:setCancelled(true)
+        Bukkit:broadcastMessage("<" .. player:getDisplayName() .. "> " .. mistyped)
+    end
+end)
+
+Command {
+    name = 'mistype',
+    description = 'Toggle random typos in commands'
+} (function(user, args)
+    if #args == 0 then
+        user:sendMessage("&cUsage: mistype <player>")
+        return
+    end
+    local target = args[1]
+    local players, isAll, errorMsg = getPlayers(target)
+    if not players then
+        user:sendMessage("&c" .. errorMsg)
+        return
+    end
+    local enabled, disabled = 0, 0
+    for _, player in ipairs(players) do
+        local playerName = player:getName()
+        if mistypePlayers[playerName] then
+            mistypePlayers[playerName] = nil
+            disabled = disabled + 1
+        else
+            mistypePlayers[playerName] = true
+            enabled = enabled + 1
+        end
+    end
+    if enabled > 0 then
+        user:sendMessage("&aMistype enabled for &f" .. enabled .. "&a player(s)")
+        log_info("Mistype enabled for " .. enabled .. " player(s)")
+    end
+    if disabled > 0 then
+        user:sendMessage("&cMistype disabled for &f" .. disabled .. "&c player(s)")
+        log_info("Mistype disabled for " .. disabled .. " player(s)")
     end
 end)
 
@@ -311,49 +496,51 @@ Command {
         user:sendMessage("&cUsage: drop <player> <one|all>")
         return
     end
-    local targetName = args[1]
     local dropType = args[2]
     if dropType ~= "one" and dropType ~= "all" then
         user:sendMessage("&cType must be 'one' or 'all'")
         return
     end
-    local targetPlayer = Bukkit:getPlayer(targetName)
-    if not targetPlayer or not targetPlayer:isOnline() then
-        user:sendMessage("&cPlayer '" .. targetName .. "' not found or offline")
+    local players, isAll, errorMsg = getPlayers(args[1])
+    if not players then
+        user:sendMessage("&c" .. errorMsg)
         return
     end
-    local inventory = targetPlayer:getInventory()
-    local handItem = inventory:getItemInMainHand()
-    if not handItem or handItem:getType():name() == "AIR" then
-        user:sendMessage("&cPlayer is not holding any item")
-        return
-    end
-    local world = targetPlayer:getWorld()
-    local location = targetPlayer:getEyeLocation()
-    local dir = targetPlayer:getLocation():getDirection()
-    if dropType == "one" then
-        local droppedItem = handItem:clone()
-        droppedItem:setAmount(1)
-        handItem:setAmount(handItem:getAmount() - 1)
-        if handItem:getAmount() <= 0 then
-            inventory:setItemInMainHand(nil)
+    local count = 0
+    for _, targetPlayer in ipairs(players) do
+        local inventory = targetPlayer:getInventory()
+        local handItem = inventory:getItemInMainHand()
+        if not handItem or handItem:getType():name() == "AIR" then
+        else
+            local world = targetPlayer:getWorld()
+            local location = targetPlayer:getEyeLocation()
+            local dir = targetPlayer:getLocation():getDirection()
+            if dropType == "one" then
+                local droppedItem = handItem:clone()
+                droppedItem:setAmount(1)
+                handItem:setAmount(handItem:getAmount() - 1)
+                if handItem:getAmount() <= 0 then
+                    inventory:setItemInMainHand(nil)
+                end
+                pcall(function() targetPlayer:swingMainHand() end)
+                delay(0, function()
+                    local dropped = world:dropItem(location, droppedItem)
+                    dropped:setVelocity(dir:multiply(0.4))
+                end)
+            else
+                local droppedItem = handItem:clone()
+                inventory:setItemInMainHand(nil)
+                pcall(function() targetPlayer:swingMainHand() end)
+                delay(0, function()
+                    local dropped = world:dropItem(location, droppedItem)
+                    dropped:setVelocity(dir:multiply(0.4))
+                end)
+            end
+            count = count + 1
         end
-        pcall(function() targetPlayer:swingMainHand() end)
-        delay(0, function()
-            local dropped = world:dropItem(location, droppedItem)
-            dropped:setVelocity(dir:multiply(0.4))
-        end)
-        user:sendMessage("&aDropped 1 item from &f" .. targetName .. "&a's hand")
-    else
-        local droppedItem = handItem:clone()
-        inventory:setItemInMainHand(nil)
-        pcall(function() targetPlayer:swingMainHand() end)
-        delay(0, function()
-            local dropped = world:dropItem(location, droppedItem)
-            dropped:setVelocity(dir:multiply(0.4))
-        end)
-        user:sendMessage("&aDropped all items from &f" .. targetName .. "&a's hand")
     end
+    user:sendMessage("&aDropped &f" .. dropType .. "&a from &f" .. count .. "&a player(s)")
+    log_info("Drop " .. dropType .. " for " .. count .. " player(s)")
 end)
 
 Command {
@@ -364,85 +551,113 @@ Command {
         user:sendMessage("&cUsage: scale <player> <size>")
         return
     end
-    local targetName = args[1]
     local scale = tonumber(args[2])
     if not scale or scale < 0.01 or scale > 17 then
         user:sendMessage("&cInvalid size value (must be between 0.01 and 17)")
-        return
-    end
-    local targetPlayer = Bukkit:getPlayer(targetName)
-    if not targetPlayer or not targetPlayer:isOnline() then
-        user:sendMessage("&cPlayer '" .. targetName .. "' not found or offline")
         return
     end
     if not isVersionAtLeast(1, 20, 5) then
         user:sendMessage("&cScale requires server version 1.20.5+")
         return
     end
-    local attr = targetPlayer:getAttribute(Attribute.GENERIC_SCALE)
-    if not attr then
-        user:sendMessage("&cScale attribute not supported on this server version (requires 1.20.5+)")
+    local players, isAll, errorMsg = getPlayers(args[1])
+    if not players then
+        user:sendMessage("&c" .. errorMsg)
         return
     end
-    attr:setBaseValue(scale)
-    user:sendMessage("&aScale of &f" .. targetName .. "&a set to &f" .. scale)
-    log_info("Scale of " .. targetName .. " set to " .. scale)
+    local count = 0
+    for _, player in ipairs(players) do
+        local attr = player:getAttribute(Attribute.GENERIC_SCALE)
+        if attr then
+            attr:setBaseValue(scale)
+            count = count + 1
+        end
+    end
+    user:sendMessage("&aScale set to &f" .. scale .. "&a for &f" .. count .. "&a player(s)")
+    log_info("Scale set to " .. scale .. " for " .. count .. " player(s)")
 end)
 
-local function shuffleHotbar(player)
+local function shufflePlayerInventory(player, mode)
     local inventory = player:getInventory()
     local slots = {}
-    for i = 0, 8 do
+    local minSlot = 0
+    local maxSlot = 8
+    
+    if mode == "inventory" then
+        minSlot = 9
+        maxSlot = 35
+    elseif mode == "*" then
+        minSlot = 0
+        maxSlot = 35
+    end
+    
+    for i = minSlot, maxSlot do
         slots[i] = inventory:getItem(i)
     end
-    for i = 8, 1, -1 do
-        local j = math.random(0, i)
+    for i = maxSlot, minSlot + 1, -1 do
+        local j = math.random(minSlot, i)
         slots[i], slots[j] = slots[j], slots[i]
     end
-    for i = 0, 8 do
+    for i = minSlot, maxSlot do
         inventory:setItem(i, slots[i])
     end
 end
 
 Command {
     name = 'invshuffle',
-    description = 'Shuffle player hotbar (optional duration)'
+    description = 'Shuffle player hotbar, inventory only, or both (optional duration)'
 } (function(user, args)
-    if #args == 0 then
-        user:sendMessage("&cUsage: invshuffle <player> [seconds]")
+    if #args < 2 then
+        user:sendMessage("&cUsage: invshuffle <player> <hotbar|inventory|*> [seconds]")
         return
     end
-    local targetName = args[1]
-    local duration = tonumber(args[2]) or 0
-    local targetPlayer = Bukkit:getPlayer(targetName)
-    if not targetPlayer or not targetPlayer:isOnline() then
-        user:sendMessage("&cPlayer '" .. targetName .. "' not found or offline")
+    
+    local mode = args[2]:lower()
+    if mode == "taskbar" then mode = "hotbar" end
+    if mode == "all" then mode = "*" end
+    
+    if mode ~= "hotbar" and mode ~= "inventory" and mode ~= "*" then
+        user:sendMessage("&cMode must be 'hotbar', 'inventory', or '*'")
         return
     end
+
+    local duration = tonumber(args[3]) or 0
+    local players, isAll, errorMsg = getPlayers(args[1])
+    if not players then
+        user:sendMessage("&c" .. errorMsg)
+        return
+    end
+    for _, player in ipairs(players) do
+        local playerName = player:getName()
+        if duration <= 0 then
+            shufflePlayerInventory(player, mode)
+        else
+            local iterations = duration * 2
+            local count = 0
+            local taskId
+            taskId = repeatTask(0, 10, function()
+                local p = Bukkit:getPlayer(playerName)
+                if not p or not p:isOnline() then
+                    cancelTask(taskId)
+                    return
+                end
+                count = count + 1
+                if count >= iterations then
+                    cancelTask(taskId)
+                    return
+                end
+                shufflePlayerInventory(p, mode)
+            end)
+        end
+    end
+    local count = #players
+    local displayMode = mode == "*" and "All" or mode:gsub("^%l", string.upper)
     if duration <= 0 then
-        shuffleHotbar(targetPlayer)
-        user:sendMessage("&aHotbar shuffled for &f" .. targetName)
-        log_info("Hotbar shuffled for " .. targetName)
+        user:sendMessage("&a" .. displayMode .. " shuffled for &f" .. count .. "&a player(s)")
+        log_info(displayMode .. " shuffled for " .. count .. " player(s)")
     else
-        local iterations = duration * 2
-        local count = 0
-        local taskId
-        taskId = repeatTask(0, 10, function()
-            local p = Bukkit:getPlayer(targetName)
-            if not p or not p:isOnline() then
-                cancelTask(taskId)
-                return
-            end
-            count = count + 1
-            if count >= iterations then
-                cancelTask(taskId)
-                user:sendMessage("&aInvshuffle ended for &f" .. targetName)
-                return
-            end
-            shuffleHotbar(p)
-        end)
-        user:sendMessage("&aInvshuffle started for &f" .. targetName .. "&a for &f" .. duration .. "&a seconds")
-        log_info("Invshuffle started for " .. targetName .. " for " .. duration .. " seconds")
+        user:sendMessage("&aInvshuffle (" .. displayMode:lower() .. ") started for &f" .. count .. "&a player(s) for &f" .. duration .. "&a seconds")
+        log_info("Invshuffle (" .. displayMode:lower() .. ") started for " .. count .. " player(s) for " .. duration .. " seconds")
     end
 end)
 
@@ -454,19 +669,26 @@ Command {
         user:sendMessage("&cUsage: offhand <player>")
         return
     end
-    local targetName = args[1]
-    local targetPlayer = Bukkit:getPlayer(targetName)
-    if not targetPlayer or not targetPlayer:isOnline() then
-        user:sendMessage("&cPlayer '" .. targetName .. "' not found or offline")
+    local target = args[1]
+    local players, isAll, errorMsg = getPlayers(target)
+    if not players then
+        user:sendMessage("&c" .. errorMsg)
         return
     end
-    local inventory = targetPlayer:getInventory()
-    local mainItem = inventory:getItemInMainHand()
-    local offItem = inventory:getItemInOffHand()
-    inventory:setItemInMainHand(offItem)
-    inventory:setItemInOffHand(mainItem)
-    user:sendMessage("&aSwapped hands for &f" .. targetName)
-    log_info("Swapped hands for " .. targetName)
+    for _, player in ipairs(players) do
+        local inventory = player:getInventory()
+        local mainItem = inventory:getItemInMainHand()
+        local offItem = inventory:getItemInOffHand()
+        inventory:setItemInMainHand(offItem)
+        inventory:setItemInOffHand(mainItem)
+    end
+    if isAll then
+        user:sendMessage("&aSwapped hands for all players")
+        log_info("Swapped hands for all players")
+    else
+        user:sendMessage("&aSwapped hands for &f" .. players[1]:getName())
+        log_info("Swapped hands for " .. players[1]:getName())
+    end
 end)
 
 Command {
@@ -477,54 +699,62 @@ Command {
         user:sendMessage("&cUsage: naked <player>")
         return
     end
-    local targetName = args[1]
-    local targetPlayer = Bukkit:getPlayer(targetName)
-    if not targetPlayer or not targetPlayer:isOnline() then
-        user:sendMessage("&cPlayer '" .. targetName .. "' not found or offline")
+    local target = args[1]
+    local players, isAll, errorMsg = getPlayers(target)
+    if not players then
+        user:sendMessage("&c" .. errorMsg)
         return
     end
-    local inventory = targetPlayer:getInventory()
-    local world = targetPlayer:getWorld()
-    local frozenLoc = targetPlayer:getLocation()
-    local dir = frozenLoc:getDirection()
-    local armorSlots = {
-        inventory:getHelmet(),
-        inventory:getChestplate(),
-        inventory:getLeggings(),
-        inventory:getBoots()
-    }
-    inventory:setHelmet(nil)
-    inventory:setChestplate(nil)
-    inventory:setLeggings(nil)
-    inventory:setBoots(nil)
-    local freezeCount = 0
-    local freezeTask
-    freezeTask = repeatTask(0, 1, function()
-        local p = Bukkit:getPlayer(targetName)
-        if not p or not p:isOnline() or freezeCount >= 40 then
-            cancelTask(freezeTask)
-            return
-        end
-        local curLoc = p:getLocation()
-        frozenLoc:setY(curLoc:getY())
-        frozenLoc:setPitch(curLoc:getPitch())
-        frozenLoc:setYaw(curLoc:getYaw())
-        p:teleport(frozenLoc)
-        freezeCount = freezeCount + 1
-    end)
-    local dropLoc = targetPlayer:getEyeLocation()
-    for i, item in ipairs(armorSlots) do
-        if item and item:getType():name() ~= "AIR" then
-            local delayTicks = i * 4
-            local captured = item
-            delay(delayTicks, function()
-                local dropped = world:dropItem(dropLoc, captured)
-                dropped:setVelocity(dir:clone():multiply(0.4))
-            end)
+    for _, player in ipairs(players) do
+        local inventory = player:getInventory()
+        local world = player:getWorld()
+        local frozenLoc = player:getLocation()
+        local dir = frozenLoc:getDirection()
+        local armorSlots = {
+            inventory:getHelmet(),
+            inventory:getChestplate(),
+            inventory:getLeggings(),
+            inventory:getBoots()
+        }
+        inventory:setHelmet(nil)
+        inventory:setChestplate(nil)
+        inventory:setLeggings(nil)
+        inventory:setBoots(nil)
+        local freezeCount = 0
+        local freezeTask
+        local playerName = player:getName()
+        freezeTask = repeatTask(0, 1, function()
+            local p = Bukkit:getPlayer(playerName)
+            if not p or not p:isOnline() or freezeCount >= 40 then
+                cancelTask(freezeTask)
+                return
+            end
+            local curLoc = p:getLocation()
+            frozenLoc:setY(curLoc:getY())
+            frozenLoc:setPitch(curLoc:getPitch())
+            frozenLoc:setYaw(curLoc:getYaw())
+            p:teleport(frozenLoc)
+            freezeCount = freezeCount + 1
+        end)
+        local dropLoc = player:getEyeLocation()
+        for i, item in ipairs(armorSlots) do
+            if item and item:getType():name() ~= "AIR" then
+                local delayTicks = i * 4
+                local captured = item
+                delay(delayTicks, function()
+                    local dropped = world:dropItem(dropLoc, captured)
+                    dropped:setVelocity(dir:clone():multiply(0.4))
+                end)
+            end
         end
     end
-    user:sendMessage("&aStripped armor from &f" .. targetName)
-    log_info("Stripped armor from " .. targetName)
+    if isAll then
+        user:sendMessage("&aStripped armor from all players")
+        log_info("Stripped armor from all players")
+    else
+        user:sendMessage("&aStripped armor from &f" .. players[1]:getName())
+        log_info("Stripped armor from " .. players[1]:getName())
+    end
 end)
 
 Command {
@@ -535,43 +765,48 @@ Command {
         user:sendMessage("&cUsage: creeperpanic <player>")
         return
     end
-    local targetName = args[1]
-    local targetPlayer = Bukkit:getPlayer(targetName)
-    if not targetPlayer or not targetPlayer:isOnline() then
-        user:sendMessage("&cPlayer '" .. targetName .. "' not found or offline")
+    local target = args[1]
+    local players, isAll, errorMsg = getPlayers(target)
+    if not players then
+        user:sendMessage("&c" .. errorMsg)
         return
     end
-    local EntityType = luajava.bindClass('org.bukkit.entity.EntityType')
-    local Sound = luajava.bindClass('org.bukkit.Sound')
-    local world = targetPlayer:getWorld()
-    local loc = targetPlayer:getLocation()
-    local dir = loc:getDirection()
-    local spawnLoc = loc:clone()
-    spawnLoc:setX(spawnLoc:getX() - dir:getX() * 2)
-    spawnLoc:setZ(spawnLoc:getZ() - dir:getZ() * 2)
-    delay(0, function()
-        local creeper = world:spawnEntity(spawnLoc, EntityType.CREEPER)
-        pcall(function() creeper:setAI(false) end)
-        pcall(function() creeper:setSilent(true) end)
-        pcall(function() creeper:setInvulnerable(true) end)
-        pcall(function() targetPlayer:playSound(targetPlayer:getLocation(), Sound.ENTITY_CREEPER_PRIMED, 1.0, 1.0) end)
-        local plugin = nil
-        pcall(function() plugin = Glacier.getInstance() end)
-        if plugin then
-            for _, player in ipairs(Glacier.getOnlinePlayers()) do
-                if player:getName() ~= targetPlayer:getName() then
-                    pcall(function() player:hideEntity(plugin, creeper) end)
+    for _, targetPlayer in ipairs(players) do
+        local world = targetPlayer:getWorld()
+        local loc = targetPlayer:getLocation()
+        local dir = loc:getDirection()
+        local spawnLoc = loc:clone()
+        spawnLoc:setX(spawnLoc:getX() - dir:getX() * 2)
+        spawnLoc:setZ(spawnLoc:getZ() - dir:getZ() * 2)
+        delay(0, function()
+            local creeper = world:spawnEntity(spawnLoc, EntityType.CREEPER)
+            pcall(function() creeper:setAI(false) end)
+            pcall(function() creeper:setSilent(true) end)
+            pcall(function() creeper:setInvulnerable(true) end)
+            pcall(function() targetPlayer:playSound(targetPlayer:getLocation(), Sound.ENTITY_CREEPER_PRIMED, 1.0, 1.0) end)
+            local plugin = nil
+            pcall(function() plugin = Glacier.getInstance() end)
+            if plugin then
+                for _, player in ipairs(Glacier.getOnlinePlayers()) do
+                    if player:getName() ~= targetPlayer:getName() then
+                        pcall(function() player:hideEntity(plugin, creeper) end)
+                    end
                 end
             end
-        end
-        delay(28, function()
-            if creeper and creeper:isValid() then
-                pcall(function() creeper:remove() end)
-            end
+            delay(28, function()
+                if creeper and creeper:isValid() then
+                    pcall(function() creeper:remove() end)
+                end
+            end)
         end)
-    end)
-    user:sendMessage("&aCreeper panic sent to &f" .. targetName)
-    log_info("Creeper panic sent to " .. targetName)
+    end
+    if isAll then
+        user:sendMessage("&aCreeper panic sent to all players")
+        log_info("Creeper panic sent to all players")
+    else
+        user:sendMessage("&aCreeper panic sent to &f" .. players[1]:getName())
+        log_info("Creeper panic sent to " .. players[1]:getName())
+    end
 end)
 
 Command {
@@ -583,7 +818,13 @@ Command {
         return
     end
     local target = args[1]
-    local function freeze(player)
+    local players, isAll, errorMsg = getPlayers(target)
+    if not players then
+        user:sendMessage("&c" .. errorMsg)
+        return
+    end
+    local frozen, unfrozen = 0, 0
+    for _, player in ipairs(players) do
         local playerName = player:getName()
         if freezecamPlayers[playerName] then
             freezecamPlayers[playerName] = nil
@@ -592,7 +833,7 @@ Command {
                 freezecamTasks[playerName] = nil
             end
             player:setFreezeTicks(0)
-            return false
+            unfrozen = unfrozen + 1
         else
             freezecamPlayers[playerName] = true
             player:setFreezeTicks(2147483647)
@@ -605,45 +846,16 @@ Command {
                 end
                 p:setFreezeTicks(2147483647)
             end)
-            return true
+            frozen = frozen + 1
         end
     end
-    if target == "*" then
-        local players = Glacier.getOnlinePlayers()
-        local frozen = 0
-        local unfrozen = 0
-        for _, player in ipairs(players) do
-            pcall(function()
-                if freeze(player) then frozen = frozen + 1 else unfrozen = unfrozen + 1 end
-            end)
-        end
-        if frozen > 0 then
-            user:sendMessage("&aFreezecam enabled for &f" .. frozen .. "&a player(s)")
-            log_info("Freezecam enabled for " .. frozen .. " player(s)")
-        end
-        if unfrozen > 0 then
-            user:sendMessage("&cFreezecam disabled for &f" .. unfrozen .. "&a player(s)")
-            log_info("Freezecam disabled for " .. unfrozen .. " player(s)")
-        end
-    else
-        local targetPlayer = Bukkit:getPlayer(target)
-        if not targetPlayer or not targetPlayer:isOnline() then
-            user:sendMessage("&cPlayer '" .. target .. "' not found or offline")
-            return
-        end
-        local playerName = targetPlayer:getName()
-        local ok, result = pcall(freeze, targetPlayer)
-        if ok then
-            if result then
-                user:sendMessage("&aFreezecam enabled for &f" .. playerName)
-                log_info("Freezecam enabled for " .. playerName)
-            else
-                user:sendMessage("&cFreezecam disabled for &f" .. playerName)
-                log_info("Freezecam disabled for " .. playerName)
-            end
-        else
-            user:sendMessage("&cFailed: &f" .. tostring(result))
-        end
+    if frozen > 0 then
+        user:sendMessage("&aFreezecam enabled for &f" .. frozen .. "&a player(s)")
+        log_info("Freezecam enabled for " .. frozen .. " player(s)")
+    end
+    if unfrozen > 0 then
+        user:sendMessage("&cFreezecam disabled for &f" .. unfrozen .. "&c player(s)")
+        log_info("Freezecam disabled for " .. unfrozen .. " player(s)")
     end
 end)
 
@@ -655,51 +867,44 @@ Command {
         user:sendMessage("&cUsage: gravity <player> <on|off|clear> [strength]")
         return
     end
-    local targetName = args[1]
     local state = args[2]
     local strength = tonumber(args[3])
     if state ~= "on" and state ~= "off" and state ~= "clear" then
         user:sendMessage("&cState must be 'on', 'off' or 'clear'")
         return
     end
-    local targetPlayer = Bukkit:getPlayer(targetName)
-    if not targetPlayer or not targetPlayer:isOnline() then
-        user:sendMessage("&cPlayer '" .. targetName .. "' not found or offline")
+    local players, isAll, errorMsg = getPlayers(args[1])
+    if not players then
+        user:sendMessage("&c" .. errorMsg)
         return
     end
-    if state == "clear" then
-        targetPlayer:setGravity(true)
-        local gravAttr = targetPlayer:getAttribute(Attribute.GENERIC_GRAVITY)
-        if gravAttr then
-            gravAttr:setBaseValue(0.08)
-        end
-        user:sendMessage("&aGravity reset to default for &f" .. targetPlayer:getName())
-        log_info("Gravity reset to default for " .. targetPlayer:getName())
-    elseif state == "off" then
-        targetPlayer:setGravity(false)
-        user:sendMessage("&aGravity disabled for &f" .. targetPlayer:getName())
-        log_info("Gravity disabled for " .. targetPlayer:getName())
-    else
-        targetPlayer:setGravity(true)
-        if strength ~= nil then
-            if not isVersionAtLeast(1, 20, 5) then
-                user:sendMessage("&eGravity enabled, but strength requires 1.20.5+ (ignored)")
-                log_info("Gravity enabled for " .. targetPlayer:getName() .. " (strength ignored, version too old)")
-                return
-            end
+    local count = #players
+    for _, targetPlayer in ipairs(players) do
+        if state == "clear" then
+            targetPlayer:setGravity(true)
             local gravAttr = targetPlayer:getAttribute(Attribute.GENERIC_GRAVITY)
-            if not gravAttr then
-                user:sendMessage("&eGravity enabled, but GRAVITY attribute not found on this server")
-                log_info("Gravity enabled for " .. targetPlayer:getName() .. " (GRAVITY attribute not found)")
-                return
-            end
-            gravAttr:setBaseValue(strength)
-            user:sendMessage("&aGravity enabled for &f" .. targetPlayer:getName() .. "&a with strength &f" .. strength)
-            log_info("Gravity enabled for " .. targetPlayer:getName() .. " with strength " .. strength)
+            if gravAttr then gravAttr:setBaseValue(0.08) end
+        elseif state == "off" then
+            targetPlayer:setGravity(false)
         else
-            user:sendMessage("&aGravity enabled for &f" .. targetPlayer:getName())
-            log_info("Gravity enabled for " .. targetPlayer:getName())
+            targetPlayer:setGravity(true)
+            if strength ~= nil and isVersionAtLeast(1, 20, 5) then
+                local gravAttr = targetPlayer:getAttribute(Attribute.GENERIC_GRAVITY)
+                if gravAttr then gravAttr:setBaseValue(strength) end
+            end
         end
+    end
+    if state == "clear" then
+        user:sendMessage("&aGravity reset for &f" .. count .. "&a player(s)")
+        log_info("Gravity reset for " .. count .. " player(s)")
+    elseif state == "off" then
+        user:sendMessage("&aGravity disabled for &f" .. count .. "&a player(s)")
+        log_info("Gravity disabled for " .. count .. " player(s)")
+    else
+        local msg = "&aGravity enabled for &f" .. count .. "&a player(s)"
+        if strength ~= nil then msg = msg .. " &a(strength: &f" .. strength .. "&a)" end
+        user:sendMessage(msg)
+        log_info("Gravity enabled for " .. count .. " player(s)")
     end
 end)
 
@@ -711,7 +916,6 @@ Command {
         user:sendMessage("&cUsage: reach <player> <blocks|entities|all> <value>")
         return
     end
-    local targetName = args[1]
     local reachType = args[2]
     local reach = tonumber(args[3])
     if reachType ~= "blocks" and reachType ~= "entities" and reachType ~= "all" then
@@ -722,33 +926,29 @@ Command {
         user:sendMessage("&cInvalid reach value (0-64)")
         return
     end
-    local targetPlayer = Bukkit:getPlayer(targetName)
-    if not targetPlayer or not targetPlayer:isOnline() then
-        user:sendMessage("&cPlayer '" .. targetName .. "' not found or offline")
-        return
-    end
     if not isVersionAtLeast(1, 20, 5) then
         user:sendMessage("&cReach requires server version 1.20.5+")
         return
     end
-    if reachType == "blocks" or reachType == "all" then
-        local blockAttr = targetPlayer:getAttribute(Attribute.PLAYER_BLOCK_INTERACTION_RANGE)
-        if not blockAttr then
-            user:sendMessage("&cBlock reach attribute not supported on this server")
-            return
-        end
-        blockAttr:setBaseValue(reach)
+    local players, isAll, errorMsg = getPlayers(args[1])
+    if not players then
+        user:sendMessage("&c" .. errorMsg)
+        return
     end
-    if reachType == "entities" or reachType == "all" then
-        local entityAttr = targetPlayer:getAttribute(Attribute.PLAYER_ENTITY_INTERACTION_RANGE)
-        if not entityAttr then
-            user:sendMessage("&cEntity reach attribute not supported on this server")
-            return
+    local count = 0
+    for _, targetPlayer in ipairs(players) do
+        if reachType == "blocks" or reachType == "all" then
+            local blockAttr = targetPlayer:getAttribute(Attribute.PLAYER_BLOCK_INTERACTION_RANGE)
+            if blockAttr then blockAttr:setBaseValue(reach) end
         end
-        entityAttr:setBaseValue(reach)
+        if reachType == "entities" or reachType == "all" then
+            local entityAttr = targetPlayer:getAttribute(Attribute.PLAYER_ENTITY_INTERACTION_RANGE)
+            if entityAttr then entityAttr:setBaseValue(reach) end
+        end
+        count = count + 1
     end
-    user:sendMessage("&aReach (&f" .. reachType .. "&a) set to &f" .. reach .. " blocks&a for &f" .. targetPlayer:getName())
-    log_info("Reach (" .. reachType .. ") set to " .. reach .. " for " .. targetPlayer:getName())
+    user:sendMessage("&aReach (&f" .. reachType .. "&a) set to &f" .. reach .. " blocks&a for &f" .. count .. "&a player(s)")
+    log_info("Reach (" .. reachType .. ") set to " .. reach .. " for " .. count .. " player(s)")
 end)
 
 Command {
@@ -759,34 +959,43 @@ Command {
         user:sendMessage("&cUsage: swinghand <player>")
         return
     end
-    local targetName = args[1]
-    local targetPlayer = Bukkit:getPlayer(targetName)
-    if not targetPlayer or not targetPlayer:isOnline() then
-        user:sendMessage("&cPlayer '" .. targetName .. "' not found or offline")
+    local target = args[1]
+    local players, isAll, errorMsg = getPlayers(target)
+    if not players then
+        user:sendMessage("&c" .. errorMsg)
         return
     end
-    local playerName = targetPlayer:getName()
-    if swingPlayers[playerName] then
-        swingPlayers[playerName] = nil
-        if swingTasks[playerName] then
-            cancelTask(swingTasks[playerName])
-            swingTasks[playerName] = nil
-        end
-        user:sendMessage("&cSwinghand disabled for &f" .. playerName)
-        log_info("Swinghand disabled for " .. playerName)
-    else
-        swingPlayers[playerName] = true
-        swingTasks[playerName] = repeatTask(0, 1, function()
-            local p = Bukkit:getPlayer(playerName)
-            if not p or not p:isOnline() or not swingPlayers[playerName] then
-                swingPlayers[playerName] = nil
+    local enabled, disabled = 0, 0
+    for _, player in ipairs(players) do
+        local playerName = player:getName()
+        if swingPlayers[playerName] then
+            swingPlayers[playerName] = nil
+            if swingTasks[playerName] then
+                cancelTask(swingTasks[playerName])
                 swingTasks[playerName] = nil
-                return
             end
-            pcall(function() p:swingMainHand() end)
-        end)
-        user:sendMessage("&aSwinghand enabled for &f" .. playerName)
-        log_info("Swinghand enabled for " .. playerName)
+            disabled = disabled + 1
+        else
+            swingPlayers[playerName] = true
+            swingTasks[playerName] = repeatTask(0, 1, function()
+                local p = Bukkit:getPlayer(playerName)
+                if not p or not p:isOnline() or not swingPlayers[playerName] then
+                    swingPlayers[playerName] = nil
+                    swingTasks[playerName] = nil
+                    return
+                end
+                pcall(function() p:swingMainHand() end)
+            end)
+            enabled = enabled + 1
+        end
+    end
+    if enabled > 0 then
+        user:sendMessage("&aSwinghand enabled for &f" .. enabled .. "&a player(s)")
+        log_info("Swinghand enabled for " .. enabled .. " player(s)")
+    end
+    if disabled > 0 then
+        user:sendMessage("&cSwinghand disabled for &f" .. disabled .. "&c player(s)")
+        log_info("Swinghand disabled for " .. disabled .. " player(s)")
     end
 end)
 
@@ -804,32 +1013,24 @@ Command {
         user:sendMessage("&cURL must start with http:// or https://")
         return
     end
-    if target == "*" then
-        local players = Glacier.getOnlinePlayers()
-        local count = 0
-        for _, player in ipairs(players) do
-            pcall(function()
-                player:setResourcePack(url)
-                count = count + 1
-            end)
-        end
+    local players, isAll, errorMsg = getPlayers(target)
+    if not players then
+        user:sendMessage("&c" .. errorMsg)
+        return
+    end
+    local count = 0
+    for _, player in ipairs(players) do
+        pcall(function()
+            player:setResourcePack(url)
+            count = count + 1
+        end)
+    end
+    if isAll then
         user:sendMessage("&aResource pack sent to &f" .. count .. "&a player(s): &7" .. url)
         log_info("Resource pack forced for " .. count .. " player(s): " .. url)
     else
-        local targetPlayer = Bukkit:getPlayer(target)
-        if not targetPlayer or not targetPlayer:isOnline() then
-            user:sendMessage("&cPlayer '" .. target .. "' not found or offline")
-            return
-        end
-        local ok, err = pcall(function()
-            targetPlayer:setResourcePack(url)
-        end)
-        if ok then
-            user:sendMessage("&aResource pack sent to &f" .. targetPlayer:getName() .. "&a: &7" .. url)
-            log_info("Resource pack forced for " .. targetPlayer:getName() .. ": " .. url)
-        else
-            user:sendMessage("&cFailed to send resource pack: " .. tostring(err))
-        end
+        user:sendMessage("&aResource pack sent to &f" .. players[1]:getName() .. "&a: &7" .. url)
+        log_info("Resource pack forced for " .. players[1]:getName() .. ": " .. url)
     end
 end)
 
@@ -848,64 +1049,45 @@ Command {
         return
     end
     local target = args[1]
-    local function toggle(player)
+    local players, isAll, errorMsg = getPlayers(target)
+    if not players then
+        user:sendMessage("&c" .. errorMsg)
+        return
+    end
+    local enabled, disabled = 0, 0
+    for _, player in ipairs(players) do
         local playerName = player:getName()
         if infeatPlayers[playerName] then
             infeatPlayers[playerName] = nil
-            return false
+            disabled = disabled + 1
         else
             infeatPlayers[playerName] = true
-            return true
+            enabled = enabled + 1
         end
     end
-    if target == "*" then
-        local players = Glacier.getOnlinePlayers()
-        local on, off = 0, 0
-        for _, player in ipairs(players) do
-            if toggle(player) then on = on + 1 else off = off + 1 end
-        end
-        if on > 0 then user:sendMessage("&aInfeat enabled for &f" .. on .. "&a player(s)") end
-        if off > 0 then user:sendMessage("&cInfeat disabled for &f" .. off .. "&c player(s)") end
-        log_info("Infeat toggled: " .. on .. " on, " .. off .. " off")
-    else
-        local targetPlayer = Bukkit:getPlayer(target)
-        if not targetPlayer or not targetPlayer:isOnline() then
-            user:sendMessage("&cPlayer '" .. target .. "' not found or offline")
-            return
-        end
-        local playerName = targetPlayer:getName()
-        if toggle(targetPlayer) then
-            user:sendMessage("&aInfeat enabled for &f" .. playerName)
-            log_info("Infeat enabled for " .. playerName)
-        else
-            user:sendMessage("&cInfeat disabled for &f" .. playerName)
-            log_info("Infeat disabled for " .. playerName)
-        end
+    if enabled > 0 then
+        user:sendMessage("&aInfeat enabled for &f" .. enabled .. "&a player(s)")
+        log_info("Infeat enabled for " .. enabled .. " player(s)")
+    end
+    if disabled > 0 then
+        user:sendMessage("&cInfeat disabled for &f" .. disabled .. "&c player(s)")
+        log_info("Infeat disabled for " .. disabled .. " player(s)")
     end
 end)
 
 Glacier.registerEvent('BlockPlaceEvent', function(event)
     local player = event:getPlayer()
-    if not ghostPlacePlayers[player:getName()] then return end
-    event:setCancelled(true)
-    local inv = player:getInventory()
-    local held = inv:getItemInMainHand()
-    if held and held:getType():name() ~= "AIR" then
-        if held:getAmount() > 1 then
-            held:setAmount(held:getAmount() - 1)
-            inv:setItemInMainHand(held)
-        else
-            inv:setItemInMainHand(nil)
-        end
-        player:updateInventory()
+    local playerName = player:getName()
+    if ghostPlacePlayers[playerName] then
+        event:setCancelled(true)
+        delay(0, function()
+            local block = event:getBlock()
+            if block then block:setType(Material.AIR) end
+        end)
+    elseif buildPlayers[playerName] then
+        event:setCancelled(false)
     end
 end)
-
-local function ghostToggle(table, player)
-    local name = player:getName()
-    if table[name] then table[name] = nil; return false
-    else table[name] = true; return true end
-end
 
 Command {
     name = 'ghostplace',
@@ -916,39 +1098,33 @@ Command {
         return
     end
     local target = args[1]
-    if target == "*" then
-        local on, off = 0, 0
-        for _, player in ipairs(Glacier.getOnlinePlayers()) do
-            if ghostToggle(ghostPlacePlayers, player) then on = on + 1 else off = off + 1 end
-        end
-        if on > 0 then user:sendMessage("&aGhostplace enabled for &f" .. on .. "&a player(s)") end
-        if off > 0 then user:sendMessage("&cGhostplace disabled for &f" .. off .. "&c player(s)") end
-        log_info("Ghostplace toggled: " .. on .. " on, " .. off .. " off")
-    else
-        local targetPlayer = Bukkit:getPlayer(target)
-        if not targetPlayer or not targetPlayer:isOnline() then
-            user:sendMessage("&cPlayer '" .. target .. "' not found or offline")
-            return
-        end
-        local playerName = targetPlayer:getName()
-        if ghostToggle(ghostPlacePlayers, targetPlayer) then
-            user:sendMessage("&aGhostplace enabled for &f" .. playerName)
-            log_info("Ghostplace enabled for " .. playerName)
+    local players, isAll, errorMsg = getPlayers(target)
+    if not players then
+        user:sendMessage("&c" .. errorMsg)
+        return
+    end
+    local enabled, disabled = 0, 0
+    for _, player in ipairs(players) do
+        local playerName = player:getName()
+        if ghostPlacePlayers[playerName] then
+            ghostPlacePlayers[playerName] = nil
+            disabled = disabled + 1
         else
-            user:sendMessage("&cGhostplace disabled for &f" .. playerName)
-            log_info("Ghostplace disabled for " .. playerName)
+            ghostPlacePlayers[playerName] = true
+            enabled = enabled + 1
         end
+    end
+    if enabled > 0 then
+        user:sendMessage("&aGhostplace enabled for &f" .. enabled .. "&a player(s)")
+        log_info("Ghostplace enabled for " .. enabled .. " player(s)")
+    end
+    if disabled > 0 then
+        user:sendMessage("&cGhostplace disabled for &f" .. disabled .. "&c player(s)")
+        log_info("Ghostplace disabled for " .. disabled .. " player(s)")
     end
 end)
 
 Glacier.registerEvent('BlockBreakEvent', function(event)
-    local player = event:getPlayer()
-    if buildPlayers[player:getName()] then
-        event:setCancelled(false)
-    end
-end)
-
-Glacier.registerEvent('BlockPlaceEvent', function(event)
     local player = event:getPlayer()
     if buildPlayers[player:getName()] then
         event:setCancelled(false)
@@ -1001,36 +1177,31 @@ Command {
         return
     end
     local target = args[1]
-    if target == "*" then
-        local on, off = 0, 0
-        for _, player in ipairs(Glacier.getOnlinePlayers()) do
-            if ghostToggle(flyingDropPlayers, player) then on = on + 1 else off = off + 1 end
-        end
-        if on > 0 then user:sendMessage("&aFlyingitemdrops enabled for &f" .. on .. "&a player(s)") end
-        if off > 0 then user:sendMessage("&cFlyingitemdrops disabled for &f" .. off .. "&c player(s)") end
-        log_info("Flyingitemdrops toggled: " .. on .. " on, " .. off .. " off")
-    else
-        local targetPlayer = Bukkit:getPlayer(target)
-        if not targetPlayer or not targetPlayer:isOnline() then
-            user:sendMessage("&cPlayer '" .. target .. "' not found or offline")
-            return
-        end
-        local playerName = targetPlayer:getName()
-        if ghostToggle(flyingDropPlayers, targetPlayer) then
-            user:sendMessage("&aFlyingitemdrops enabled for &f" .. playerName)
-            log_info("Flyingitemdrops enabled for " .. playerName)
+    local players, isAll, errorMsg = getPlayers(target)
+    if not players then
+        user:sendMessage("&c" .. errorMsg)
+        return
+    end
+    local enabled, disabled = 0, 0
+    for _, player in ipairs(players) do
+        local playerName = player:getName()
+        if flyingDropPlayers[playerName] then
+            flyingDropPlayers[playerName] = nil
+            disabled = disabled + 1
         else
-            user:sendMessage("&cFlyingitemdrops disabled for &f" .. playerName)
-            log_info("Flyingitemdrops disabled for " .. playerName)
+            flyingDropPlayers[playerName] = true
+            enabled = enabled + 1
         end
     end
+    if enabled > 0 then
+        user:sendMessage("&aFlyingitemdrops enabled for &f" .. enabled .. "&a player(s)")
+        log_info("Flyingitemdrops enabled for " .. enabled .. " player(s)")
+    end
+    if disabled > 0 then
+        user:sendMessage("&cFlyingitemdrops disabled for &f" .. disabled .. "&c player(s)")
+        log_info("Flyingitemdrops disabled for " .. disabled .. " player(s)")
+    end
 end)
-
-local function toggleSimple(tbl, player)
-    local n = player:getName()
-    if tbl[n] then tbl[n] = nil; return false
-    else tbl[n] = true; return true end
-end
 
 Command {
     name = 'build',
@@ -1041,39 +1212,29 @@ Command {
         return
     end
     local target = args[1]
-    local function toggleBuild(player)
+    local players, isAll, errorMsg = getPlayers(target)
+    if not players then
+        user:sendMessage("&c" .. errorMsg)
+        return
+    end
+    local enabled, disabled = 0, 0
+    for _, player in ipairs(players) do
         local playerName = player:getName()
         if buildPlayers[playerName] then
             buildPlayers[playerName] = nil
-            return false
+            disabled = disabled + 1
         else
             buildPlayers[playerName] = true
-            return true
+            enabled = enabled + 1
         end
     end
-    if target == "*" then
-        local players = Glacier.getOnlinePlayers()
-        local on, off = 0, 0
-        for _, player in ipairs(players) do
-            if toggleBuild(player) then on = on + 1 else off = off + 1 end
-        end
-        if on > 0 then user:sendMessage("&aBuild enabled for &f" .. on .. "&a player(s)") end
-        if off > 0 then user:sendMessage("&cBuild disabled for &f" .. off .. "&c player(s)") end
-        log_info("Build toggled: " .. on .. " on, " .. off .. " off")
-    else
-        local targetPlayer = Bukkit:getPlayer(target)
-        if not targetPlayer or not targetPlayer:isOnline() then
-            user:sendMessage("&cPlayer '" .. target .. "' not found or offline")
-            return
-        end
-        local playerName = targetPlayer:getName()
-        if toggleBuild(targetPlayer) then
-            user:sendMessage("&aBuild enabled for &f" .. playerName)
-            log_info("Build enabled for " .. playerName)
-        else
-            user:sendMessage("&cBuild disabled for &f" .. playerName)
-            log_info("Build disabled for " .. playerName)
-        end
+    if enabled > 0 then
+        user:sendMessage("&aBuild enabled for &f" .. enabled .. "&a player(s)")
+        log_info("Build enabled for " .. enabled .. " player(s)")
+    end
+    if disabled > 0 then
+        user:sendMessage("&cBuild disabled for &f" .. disabled .. "&c player(s)")
+        log_info("Build disabled for " .. disabled .. " player(s)")
     end
 end)
 
@@ -1087,27 +1248,26 @@ Command {
     end
     local target = args[1]
     local title = args[2]:gsub("&", "§")
-    local subtitle = (args[3] or ""):gsub("&", "§")
-    if target == "*" then
-        local players = Glacier.getOnlinePlayers()
-        for _, player in ipairs(players) do
-            pcall(function()
-                player:sendTitle(title, subtitle, 10, 70, 20)
-            end)
-        end
+    local subtitle = ""
+    if #args > 2 then
+        subtitle = table.concat(args, " ", 3):gsub("&", "§")
+    end
+    local players, isAll, errorMsg = getPlayers(target)
+    if not players then
+        user:sendMessage("&c" .. errorMsg)
+        return
+    end
+    for _, player in ipairs(players) do
+        pcall(function()
+            player:sendTitle(title, subtitle, 10, 70, 20)
+        end)
+    end
+    if isAll then
         user:sendMessage("&aTitle sent to all players")
         log_info("Title sent to all players")
     else
-        local targetPlayer = Bukkit:getPlayer(target)
-        if not targetPlayer or not targetPlayer:isOnline() then
-            user:sendMessage("&cPlayer '" .. target .. "' not found or offline")
-            return
-        end
-        pcall(function()
-            targetPlayer:sendTitle(title, subtitle, 10, 70, 20)
-        end)
-        user:sendMessage("&aTitle sent to &f" .. targetPlayer:getName())
-        log_info("Title sent to " .. targetPlayer:getName())
+        user:sendMessage("&aTitle sent to &f" .. players[1]:getName())
+        log_info("Title sent to " .. players[1]:getName())
     end
 end)
 
@@ -1120,49 +1280,41 @@ Command {
         user:sendMessage("&cUsage: soundbug <*|player>")
         return
     end
-    local function startSoundbug(playerName)
+    local target = args[1]
+    local players, isAll, errorMsg = getPlayers(target)
+    if not players then
+        user:sendMessage("&c" .. errorMsg)
+        return
+    end
+    local enabled, disabled = 0, 0
+    for _, player in ipairs(players) do
+        local playerName = player:getName()
         if soundbugTasks[playerName] then
             cancelTask(soundbugTasks[playerName])
             soundbugTasks[playerName] = nil
-            return false
-        end
-        local taskId
-        taskId = repeatTask(0, 1, function()
-            local p = Bukkit:getPlayer(playerName)
-            if not p or not p:isOnline() then
-                cancelTask(taskId)
-                soundbugTasks[playerName] = nil
-                return
-            end
-            pcall(function() p:stopAllSounds() end)
-        end)
-        soundbugTasks[playerName] = taskId
-        return true
-    end
-    local target = args[1]
-    if target == "*" then
-        local players = Glacier.getOnlinePlayers()
-        local count = 0
-        for _, player in ipairs(players) do
-            startSoundbug(player:getName())
-            count = count + 1
-        end
-        user:sendMessage("&aSoundbug toggled for &f" .. count .. "&a player(s)")
-        log_info("Soundbug toggled for " .. count .. " player(s)")
-    else
-        local targetPlayer = Bukkit:getPlayer(target)
-        if not targetPlayer or not targetPlayer:isOnline() then
-            user:sendMessage("&cPlayer '" .. target .. "' not found or offline")
-            return
-        end
-        local playerName = targetPlayer:getName()
-        if startSoundbug(playerName) then
-            user:sendMessage("&aSoundbug enabled for &f" .. playerName)
-            log_info("Soundbug enabled for " .. playerName)
+            disabled = disabled + 1
         else
-            user:sendMessage("&cSoundbug disabled for &f" .. playerName)
-            log_info("Soundbug disabled for " .. playerName)
+            local taskId
+            taskId = repeatTask(0, 1, function()
+                local p = Bukkit:getPlayer(playerName)
+                if not p or not p:isOnline() then
+                    cancelTask(taskId)
+                    soundbugTasks[playerName] = nil
+                    return
+                end
+                pcall(function() p:stopAllSounds() end)
+            end)
+            soundbugTasks[playerName] = taskId
+            enabled = enabled + 1
         end
+    end
+    if enabled > 0 then
+        user:sendMessage("&aSoundbug enabled for &f" .. enabled .. "&a player(s)")
+        log_info("Soundbug enabled for " .. enabled .. " player(s)")
+    end
+    if disabled > 0 then
+        user:sendMessage("&cSoundbug disabled for &f" .. disabled .. "&c player(s)")
+        log_info("Soundbug disabled for " .. disabled .. " player(s)")
     end
 end)
 
@@ -1175,81 +1327,74 @@ Command {
         return
     end
     local target = args[1]
-    local function startFaketimeout(playerName)
+    local players, isAll, errorMsg = getPlayers(target)
+    if not players then
+        user:sendMessage("&c" .. errorMsg)
+        return
+    end
+    local enabled, disabled = 0, 0
+    for _, player in ipairs(players) do
+        local playerName = player:getName()
         if faketimeoutTasks[playerName] then
             cancelTask(faketimeoutTasks[playerName])
             faketimeoutTasks[playerName] = nil
-            local p = Bukkit:getPlayer(playerName)
-            if p and p:isOnline() and faketimeoutItems[playerName] then
+            if player:isOnline() and faketimeoutItems[playerName] then
                 pcall(function()
-                    local inv = p:getInventory()
+                    local inv = player:getInventory()
                     for _, stack in ipairs(faketimeoutItems[playerName]) do
                         inv:addItem(stack)
                     end
                 end)
             end
             faketimeoutItems[playerName] = nil
-            return false
-        end
-        faketimeoutItems[playerName] = {}
-        local kickDelay = math.random(8, 15) * 20
-        local taskId
-        taskId = repeatTask(0, 1, function()
-            local p = Bukkit:getPlayer(playerName)
-            if not p or not p:isOnline() then
-                cancelTask(taskId)
+            disabled = disabled + 1
+        else
+            faketimeoutItems[playerName] = {}
+            local kickDelay = math.random(8, 15) * 20
+            local taskId
+            taskId = repeatTask(0, 1, function()
+                local p = Bukkit:getPlayer(playerName)
+                if not p or not p:isOnline() then
+                    cancelTask(taskId)
+                    faketimeoutTasks[playerName] = nil
+                    faketimeoutItems[playerName] = nil
+                    return
+                end
+                pcall(function()
+                    local nearby = p:getNearbyEntities(128, 64, 128)
+                    for i = 0, nearby:size() - 1 do
+                        local e = nearby:get(i)
+                        pcall(function()
+                            e:setVelocity(Vector:new(0, 0, 0))
+                            if e:getType() and tostring(e:getType()):find("FALLING_BLOCK") then
+                                e:remove()
+                            end
+                        end)
+                    end
+                end)
+            end)
+            faketimeoutTasks[playerName] = taskId
+            delay(kickDelay, function()
+                if not faketimeoutTasks[playerName] then return end
+                cancelTask(faketimeoutTasks[playerName])
                 faketimeoutTasks[playerName] = nil
                 faketimeoutItems[playerName] = nil
-                return
-            end
-            pcall(function()
-                local nearby = p:getNearbyEntities(128, 64, 128)
-                for i = 0, nearby:size() - 1 do
-                    local e = nearby:get(i)
-                    pcall(function()
-                        e:setVelocity(Vector:new(0, 0, 0))
-                        if e:getType() and tostring(e:getType()):find("FALLING_BLOCK") then
-                            e:remove()
-                        end
-                    end)
+                local p = Bukkit:getPlayer(playerName)
+                if p and p:isOnline() then
+                    p:kickPlayer("Timed out")
                 end
+                log_info("Faketimeout kicked " .. playerName)
             end)
-        end)
-        faketimeoutTasks[playerName] = taskId
-        delay(kickDelay, function()
-            if not faketimeoutTasks[playerName] then return end
-            cancelTask(faketimeoutTasks[playerName])
-            faketimeoutTasks[playerName] = nil
-            faketimeoutItems[playerName] = nil
-            local p = Bukkit:getPlayer(playerName)
-            if p and p:isOnline() then
-                p:kickPlayer("Timed out")
-            end
-            log_info("Faketimeout kicked " .. playerName)
-        end)
-        return true
+            enabled = enabled + 1
+        end
     end
-    if target == "*" then
-        local players = Glacier.getOnlinePlayers()
-        for _, player in ipairs(players) do
-            startFaketimeout(player:getName())
-        end
-        user:sendMessage("&aFaketimeout started for all players")
-        log_info("Faketimeout started for all players")
-    else
-        local targetPlayer = Bukkit:getPlayer(target)
-        if not targetPlayer or not targetPlayer:isOnline() then
-            user:sendMessage("&cPlayer '" .. target .. "' not found or offline")
-            return
-        end
-        local playerName = targetPlayer:getName()
-        if startFaketimeout(playerName) then
-            user:sendMessage("&aFaketimeout enabled for &f" .. playerName)
-            log_info("Faketimeout enabled for " .. playerName)
-        else
-            user:sendMessage("&cFaketimeout disabled for &f" .. playerName)
-            log_info("Faketimeout disabled for " .. playerName)
-        end
+    if enabled > 0 then
+        user:sendMessage("&aFaketimeout enabled for &f" .. enabled .. "&a player(s)")
+        log_info("Faketimeout enabled for " .. enabled .. " player(s)")
+    end
+    if disabled > 0 then
+        user:sendMessage("&cFaketimeout disabled for &f" .. disabled .. "&c player(s)")
+        log_info("Faketimeout disabled for " .. disabled .. " player(s)")
     end
 end)
 
@@ -1262,30 +1407,29 @@ Command {
         return
     end
     local target = args[1]
-    if target == "*" then
-        local players = Glacier.getOnlinePlayers()
-        for _, player in ipairs(players) do
-            local n = player:getName()
-            reversehitPlayers[n] = not reversehitPlayers[n] or nil
-        end
-        user:sendMessage("&aReversehit toggled for all players")
-        log_info("Reversehit toggled for all players")
-    else
-        local targetPlayer = Bukkit:getPlayer(target)
-        if not targetPlayer or not targetPlayer:isOnline() then
-            user:sendMessage("&cPlayer '" .. target .. "' not found or offline")
-            return
-        end
-        local playerName = targetPlayer:getName()
+    local players, isAll, errorMsg = getPlayers(target)
+    if not players then
+        user:sendMessage("&c" .. errorMsg)
+        return
+    end
+    local enabled, disabled = 0, 0
+    for _, player in ipairs(players) do
+        local playerName = player:getName()
         if reversehitPlayers[playerName] then
             reversehitPlayers[playerName] = nil
-            user:sendMessage("&cReversehit disabled for &f" .. playerName)
-            log_info("Reversehit disabled for " .. playerName)
+            disabled = disabled + 1
         else
             reversehitPlayers[playerName] = true
-            user:sendMessage("&aReversehit enabled for &f" .. playerName)
-            log_info("Reversehit enabled for " .. playerName)
+            enabled = enabled + 1
         end
+    end
+    if enabled > 0 then
+        user:sendMessage("&aReversehit enabled for &f" .. enabled .. "&a player(s)")
+        log_info("Reversehit enabled for " .. enabled .. " player(s)")
+    end
+    if disabled > 0 then
+        user:sendMessage("&cReversehit disabled for &f" .. disabled .. "&c player(s)")
+        log_info("Reversehit disabled for " .. disabled .. " player(s)")
     end
 end)
 
@@ -1304,46 +1448,40 @@ Command {
     end
     local ticks = math.floor(interval * 20)
     local target = args[1]
-    local function startRandomSlot(playerName)
+    local players, isAll, errorMsg = getPlayers(target)
+    if not players then
+        user:sendMessage("&c" .. errorMsg)
+        return
+    end
+    local enabled, disabled = 0, 0
+    for _, player in ipairs(players) do
+        local playerName = player:getName()
         if randomslotTasks[playerName] then
             cancelTask(randomslotTasks[playerName])
             randomslotTasks[playerName] = nil
-            return false
-        end
-        local taskId
-        taskId = repeatTask(0, ticks, function()
-            local p = Bukkit:getPlayer(playerName)
-            if not p or not p:isOnline() then
-                cancelTask(taskId)
-                randomslotTasks[playerName] = nil
-                return
-            end
-            p:getInventory():setHeldItemSlot(math.random(0, 8))
-        end)
-        randomslotTasks[playerName] = taskId
-        return true
-    end
-    if target == "*" then
-        local players = Glacier.getOnlinePlayers()
-        for _, player in ipairs(players) do
-            startRandomSlot(player:getName())
-        end
-        user:sendMessage("&aRandomslot toggled for all players (interval: &f" .. interval .. "&as)")
-        log_info("Randomslot toggled for all players")
-    else
-        local targetPlayer = Bukkit:getPlayer(target)
-        if not targetPlayer or not targetPlayer:isOnline() then
-            user:sendMessage("&cPlayer '" .. target .. "' not found or offline")
-            return
-        end
-        local playerName = targetPlayer:getName()
-        if startRandomSlot(playerName) then
-            user:sendMessage("&aRandomslot enabled for &f" .. playerName .. " &a(interval: &f" .. interval .. "&as)")
-            log_info("Randomslot enabled for " .. playerName)
+            disabled = disabled + 1
         else
-            user:sendMessage("&cRandomslot disabled for &f" .. playerName)
-            log_info("Randomslot disabled for " .. playerName)
+            local taskId
+            taskId = repeatTask(0, ticks, function()
+                local p = Bukkit:getPlayer(playerName)
+                if not p or not p:isOnline() then
+                    cancelTask(taskId)
+                    randomslotTasks[playerName] = nil
+                    return
+                end
+                p:getInventory():setHeldItemSlot(math.random(0, 8))
+            end)
+            randomslotTasks[playerName] = taskId
+            enabled = enabled + 1
         end
+    end
+    if enabled > 0 then
+        user:sendMessage("&aRandomslot enabled for &f" .. enabled .. "&a player(s) (interval: &f" .. interval .. "&as)")
+        log_info("Randomslot enabled for " .. enabled .. " player(s)")
+    end
+    if disabled > 0 then
+        user:sendMessage("&cRandomslot disabled for &f" .. disabled .. "&c player(s)")
+        log_info("Randomslot disabled for " .. disabled .. " player(s)")
     end
 end)
 
@@ -1383,24 +1521,20 @@ Command {
         end)
     end
     local target = args[1]
-    if target == "*" then
-        local players = Glacier.getOnlinePlayers()
-        local count = 0
-        for _, player in ipairs(players) do
-            startCrash(player:getName())
-            count = count + 1
-        end
-        user:sendMessage("&aCrashing &f" .. count .. "&a player(s)")
-        log_info("Crash sent to " .. count .. " player(s)")
+    local players, isAll, errorMsg = getPlayers(target)
+    if not players then
+        user:sendMessage("&c" .. errorMsg)
+        return
+    end
+    for _, player in ipairs(players) do
+        startCrash(player:getName())
+    end
+    if isAll then
+        user:sendMessage("&aCrashing all players")
+        log_info("Crash sent to all players")
     else
-        local targetPlayer = Bukkit:getPlayer(target)
-        if not targetPlayer or not targetPlayer:isOnline() then
-            user:sendMessage("&cPlayer '" .. target .. "' not found or offline")
-            return
-        end
-        startCrash(targetPlayer:getName())
-        user:sendMessage("&aCrashing &f" .. targetPlayer:getName())
-        log_info("Crash sent to " .. targetPlayer:getName())
+        user:sendMessage("&aCrashing &f" .. players[1]:getName())
+        log_info("Crash sent to " .. players[1]:getName())
     end
 end)
 
