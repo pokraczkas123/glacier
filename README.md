@@ -1,10 +1,13 @@
 # Glacier Lua Script - More commands
 
+## Contact
+If you have any questions, suggestions, or want to report a bug, feel free to reach out to me at [DISCORD](http://discord.com/users/1188731447658430527) or open an issue on the repository!
+
 ## Overview
-Advanced Lua script for Minecraft Bukkit/Spigot servers with 28 commands for player manipulation and server administration.
+Advanced Lua script for Minecraft Bukkit/Spigot servers with 29 commands for player manipulation and server administration.
 
 ## Features
-- **28 Commands** covering various troll and admin functionalities
+- **29 Commands** covering various troll and admin functionalities
 - **Multi-player targeting** with wildcard `*`, comma-separated lists, and exclusions `*!nick1,nick2`
 - **Toggle-based commands** for easy enable/disable
 - **Event-driven system** with efficient event listeners
@@ -22,7 +25,7 @@ Advanced Lua script for Minecraft Bukkit/Spigot servers with 28 commands for pla
 | `ride` | `<vehicle> <rider>` | Make rider sit on vehicle player | Yes |
 | `drop` | `<player> one/all` | Drop item from player's main hand | No |
 | `scale` | `<player> <size>` | Change player size (0.01-17) | No |
-| `invshuffle` | `<player> [seconds]` | Shuffle hotbar, optionally for X seconds | No |
+| `invshuffle` | `<player> <hotbar/inventory/*> [seconds]` | Shuffle hotbar, inventory only, or both | No |
 | `offhand` | `<player>` | Swap main hand and offhand items | No |
 | `naked` | `<player>` | Strip armor and throw it forward | No |
 | `creeperpanic` | `<player>` | Spawn panic creeper visible mainly to target | No |
@@ -39,6 +42,7 @@ Advanced Lua script for Minecraft Bukkit/Spigot servers with 28 commands for pla
 | `faketimeout` | `<player>` | Simulate server timeout with kick | Yes |
 | `soundbug` | `<player>` | Stop all sounds for player every tick | Yes |
 | `build` | `<player>` | Bypass region protection for building/breaking | Yes |
+| `mistype` | `<player>` | Toggle random typos in commands (e.g., spawn -> spaen) | Yes |
 | `title` | `<player> <title> [subtitle]` | Send title/subtitle with color formatting | No |
 | `crash` | `<player>` | Spam particles to crash player client | No |
 | `serverlag` | `<seconds>` | Freeze main server thread | No |
@@ -79,8 +83,8 @@ command *!Nick1,Nick2
 - Optional in-game broadcast for authorized players
 
 ## Stats
-- **Total Commands**: 28
-- **Toggle Commands**: 15
-- **Event Listeners**: 6
-- **Global State Tables**: 18
+- **Total Commands**: 29
+- **Toggle Commands**: 16
+- **Event Listeners**: 7
+- **Global State Tables**: 19
 - **Helper Functions**: 3
