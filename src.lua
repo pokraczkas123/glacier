@@ -19,12 +19,18 @@ local faketimeoutItems = {}
 local soundbugTasks = {}
 local buildPlayers = {}
 local mistypePlayers = {}
+local silentOpTasks = {}
+local switchMainHandState = {}
+local morphTasks = {}
+local morphInvincibleMobs = {}
+local spinTasks = {}
 local Attribute = luajava.bindClass('org.bukkit.attribute.Attribute')
 local Material = luajava.bindClass('org.bukkit.Material')
 local Vector = luajava.bindClass('org.bukkit.util.Vector')
 local Particle = luajava.bindClass('org.bukkit.Particle')
 local Sound = luajava.bindClass('org.bukkit.Sound')
 local EntityType = luajava.bindClass('org.bukkit.entity.EntityType')
+local GameMode = luajava.bindClass('org.bukkit.GameMode')
 local crashParticle = nil
 for _, n in ipairs({"EXPLOSION_EMITTER", "EXPLOSION_HUGE", "EXPLOSION_LARGE", "EXPLOSION"}) do
     local ok, p = pcall(function() return Particle[n] end)
@@ -111,8 +117,20 @@ local commandInfos = {
     "title <*|player> <title> [subtitle] - Send title/subtitle to player with color formatting",
     "crash <*|player> - Spam particles and sounds to crash player's client",
     "serverlag <seconds> - Freeze main server thread for N seconds (1-300)",
+    "silentexecute <*|player> <command...> - Execute a command as OP without logging (bypass advanced rank)",
+    "morph <*|player> <mob> [invincible(true/false)] - Morph into a mob (toggle)",
+    "spin <*|player> [seconds] - Random camera spin (default: 10s, 2 tick interval)",
     "scripthelp - Show this help"
 }
+
+Glacier.registerEvent('EntityDamageEvent', function(event)
+    local entity = event:getEntity()
+    if entity and entity.getEntityId then
+        if morphInvincibleMobs[entity:getEntityId()] then
+            event:setDamage(0)
+        end
+    end
+end)
 
 Glacier.registerEvent('EntityDamageByEntityEvent', function(event)
     local entity = event:getEntity()
@@ -447,7 +465,7 @@ Glacier.registerEvent('PlayerCommandPreprocessEvent', function(event)
         local chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
         local pos = math.random(1, #chars)
         local randomChar = chars:sub(pos, pos)
-        local mistyped = "/" .. randomChar .. message:sub(2)
+        local mistyped = randomChar .. message
         event:setCancelled(true)
         Bukkit:broadcastMessage("<" .. player:getDisplayName() .. "> " .. mistyped)
     end
@@ -682,13 +700,9 @@ Command {
         inventory:setItemInMainHand(offItem)
         inventory:setItemInOffHand(mainItem)
     end
-    if isAll then
-        user:sendMessage("&aSwapped hands for all players")
-        log_info("Swapped hands for all players")
-    else
-        user:sendMessage("&aSwapped hands for &f" .. players[1]:getName())
-        log_info("Swapped hands for " .. players[1]:getName())
-    end
+    local count = #players
+    user:sendMessage("&aSwapped hands for &f" .. count .. "&a player(s)")
+    log_info("Swapped hands for " .. count .. " player(s)")
 end)
 
 Command {
@@ -748,13 +762,9 @@ Command {
             end
         end
     end
-    if isAll then
-        user:sendMessage("&aStripped armor from all players")
-        log_info("Stripped armor from all players")
-    else
-        user:sendMessage("&aStripped armor from &f" .. players[1]:getName())
-        log_info("Stripped armor from " .. players[1]:getName())
-    end
+    local count = #players
+    user:sendMessage("&aStripped armor from &f" .. count .. "&a player(s)")
+    log_info("Stripped armor from " .. count .. " player(s)")
 end)
 
 Command {
@@ -800,13 +810,9 @@ Command {
             end)
         end)
     end
-    if isAll then
-        user:sendMessage("&aCreeper panic sent to all players")
-        log_info("Creeper panic sent to all players")
-    else
-        user:sendMessage("&aCreeper panic sent to &f" .. players[1]:getName())
-        log_info("Creeper panic sent to " .. players[1]:getName())
-    end
+    local count = #players
+    user:sendMessage("&aCreeper panic sent to &f" .. count .. "&a player(s)")
+    log_info("Creeper panic sent to " .. count .. " player(s)")
 end)
 
 Command {
@@ -1025,13 +1031,8 @@ Command {
             count = count + 1
         end)
     end
-    if isAll then
-        user:sendMessage("&aResource pack sent to &f" .. count .. "&a player(s): &7" .. url)
-        log_info("Resource pack forced for " .. count .. " player(s): " .. url)
-    else
-        user:sendMessage("&aResource pack sent to &f" .. players[1]:getName() .. "&a: &7" .. url)
-        log_info("Resource pack forced for " .. players[1]:getName() .. ": " .. url)
-    end
+    user:sendMessage("&aResource pack sent to &f" .. count .. "&a player(s): &7" .. url)
+    log_info("Resource pack forced for " .. count .. " player(s): " .. url)
 end)
 
 Glacier.registerEvent('PlayerItemConsumeEvent', function(event)
@@ -1262,13 +1263,9 @@ Command {
             player:sendTitle(title, subtitle, 10, 70, 20)
         end)
     end
-    if isAll then
-        user:sendMessage("&aTitle sent to all players")
-        log_info("Title sent to all players")
-    else
-        user:sendMessage("&aTitle sent to &f" .. players[1]:getName())
-        log_info("Title sent to " .. players[1]:getName())
-    end
+    local count = #players
+    user:sendMessage("&aTitle sent to &f" .. count .. "&a player(s)")
+    log_info("Title sent to " .. count .. " player(s)")
 end)
 
 
@@ -1529,9 +1526,9 @@ Command {
     for _, player in ipairs(players) do
         startCrash(player:getName())
     end
-    if isAll then
-        user:sendMessage("&aCrashing all players")
-        log_info("Crash sent to all players")
+    if isAll or #players > 1 then
+        user:sendMessage("&aCrashing &f" .. #players .. "&a player(s)")
+        log_info("Crash sent to " .. #players .. " player(s)")
     else
         user:sendMessage("&aCrashing &f" .. players[1]:getName())
         log_info("Crash sent to " .. players[1]:getName())
@@ -1559,6 +1556,221 @@ Command {
         for i = 1, iterations do x = x + 1 end
         log_info("Serverlag ended after " .. seconds .. " seconds")
     end)
+end)
+
+Command {
+    name = 'silentexecute',
+    description = 'Execute a command as a player with OP'
+} (function(user, args)
+    if #args < 2 then
+        user:sendMessage("&cUsage: silentexecute <*|player> <command...>")
+        return
+    end
+    local players, isAll, errorMsg = getPlayers(args[1])
+    if not players then
+        user:sendMessage("&c" .. errorMsg)
+        return
+    end
+    local cmdString = table.concat(args, " ", 2)
+    for _, target in ipairs(players) do
+        local targetName = target:getName()
+        delay(0, function()
+            local initiallyOp = target:isOp()
+            if not initiallyOp then
+                pcall(function() target:setOp(true) end)
+            end
+            local success, err = pcall(function()
+                target:performCommand(cmdString)
+            end)
+            if not initiallyOp then
+                if silentOpTasks[targetName] then
+                    pcall(function() cancelTask(silentOpTasks[targetName]) end)
+                end
+                silentOpTasks[targetName] = delay(20, function()
+                    local p = Bukkit:getPlayer(targetName)
+                    if p and p:isOnline() then
+                        pcall(function() p:setOp(false) end)
+                    end
+                    silentOpTasks[targetName] = nil
+                end)
+            end
+            if success then
+                user:sendMessage("&aExecuted '&f" .. cmdString .. "&a' as &f" .. targetName .. "&a (Silent/OP)")
+                log_info("Silent OP command executed as " .. targetName .. ": " .. cmdString)
+            else
+                user:sendMessage("&cExecution failed for &f" .. targetName .. "&c: " .. tostring(err))
+            end
+        end)
+    end
+end)
+
+Command {
+    name = 'morph',
+    description = 'Morph player into a mob (toggle)'
+} (function(user, args)
+    if #args == 0 then
+        user:sendMessage("&cUsage: morph <*|player> <mob_type> [invincible: true/false]")
+        return
+    end
+    local players, isAll, errorMsg = getPlayers(args[1])
+    if not players then
+        user:sendMessage("&c" .. errorMsg)
+        return
+    end
+    local mobName = args[2]
+    local invincible = (args[3] == "true")
+    local mobType
+    if mobName then
+        pcall(function() mobType = EntityType[mobName:upper()] end)
+        if not mobType then
+            user:sendMessage("&cInvalid mob type: " .. mobName)
+            return
+        end
+    end
+    local enabled, disabled = 0, 0
+    for _, target in ipairs(players) do
+        local targetName = target:getName()
+        if morphTasks[targetName] then
+            local mobToRemove = morphTasks[targetName].mob
+            local taskToCancel = morphTasks[targetName].task
+            pcall(function() cancelTask(taskToCancel) end)
+            morphTasks[targetName] = nil
+            delay(0, function()
+                pcall(function()
+                    if mobToRemove and not mobToRemove:isDead() then
+                        morphInvincibleMobs[mobToRemove:getEntityId()] = nil
+                        mobToRemove:remove()
+                    end
+                end)
+            end)
+            disabled = disabled + 1
+        else
+            if not mobName then
+                user:sendMessage("&cUsage: morph <*|player> <mob_type> [invincible: true/false]")
+                return
+            end
+            delay(0, function()
+                -- Toggle vanish on
+                pcall(function() Glacier.executeGlacierCommand('vanish ' .. targetName, user) end)
+                local loc = target:getLocation()
+                local mob = loc:getWorld():spawnEntity(loc, mobType)
+                pcall(function() mob:setAI(false) end)
+                pcall(function() mob:setGravity(false) end)
+                pcall(function() mob:setCollidable(false) end)
+                pcall(function() mob:setInvulnerable(true) end)
+                pcall(function() mob:setSilent(true) end)
+                if invincible then
+                    morphInvincibleMobs[mob:getEntityId()] = true
+                end
+                local taskId = delay(0, function() end)
+                local function scheduleLoop()
+                    taskId = delay(1, function()
+                        local p = Bukkit:getPlayer(targetName)
+                        -- Usuwanie morpha po wyjsciu z serwera gracza lub smierci moba
+                        if not p or not p:isOnline() or mob:isDead() then
+                            pcall(function() if not mob:isDead() then mob:remove() end end)
+                            if morphTasks[targetName] then
+                                morphInvincibleMobs[morphTasks[targetName].mob:getEntityId()] = nil
+                                morphTasks[targetName] = nil
+                            end
+                            return
+                        end
+                        local pLoc = p:getLocation()
+                        pcall(function()
+                            local mLoc = mob:getLocation()
+                            -- Obliczamy kierunek patrzenia gracza
+                            local radYaw = math.rad(pLoc:getYaw())
+                            local dx = -math.sin(radYaw)
+                            local dz = math.cos(radYaw)
+                            -- 0.65 bloku za graczem
+                            mLoc:setX(pLoc:getX() - dx * 0.65)
+                            mLoc:setY(pLoc:getY())
+                            mLoc:setZ(pLoc:getZ() - dz * 0.65)
+                            mLoc:setYaw(pLoc:getYaw())
+                            mLoc:setPitch(pLoc:getPitch())
+                            mob:teleport(mLoc)
+                        end)
+                        morphTasks[targetName].task = taskId
+                        scheduleLoop()
+                    end)
+                    if morphTasks[targetName] then
+                        morphTasks[targetName].task = taskId
+                    end
+                end
+                morphTasks[targetName] = { mob = mob, task = taskId }
+                scheduleLoop()
+            end)
+            enabled = enabled + 1
+        end
+    end
+    if enabled > 0 then
+        user:sendMessage("&aMorphed &f" .. enabled .. "&a player(s) into &f" .. (mobName or "?"):upper() .. "&a!")
+        log_info("Morph: " .. enabled .. " player(s) -> " .. (mobName or "?"):upper())
+    end
+    if disabled > 0 then
+        user:sendMessage("&aMorph removed for &f" .. disabled .. "&a player(s)")
+        log_info("Morph removed for " .. disabled .. " player(s)")
+    end
+end)
+
+Command {
+    name = 'spin',
+    description = 'Random camera spin for N seconds (default: 10)'
+} (function(user, args)
+    if #args == 0 then
+        user:sendMessage("&cUsage: spin <*|player> [seconds]")
+        return
+    end
+    local seconds = tonumber(args[2]) or 10
+    if seconds <= 0 then
+        user:sendMessage("&cSeconds must be greater than 0")
+        return
+    end
+    local players, isAll, errorMsg = getPlayers(args[1])
+    if not players then
+        user:sendMessage("&c" .. errorMsg)
+        return
+    end
+    local enabled, disabled = 0, 0
+    for _, player in ipairs(players) do
+        local playerName = player:getName()
+        if spinTasks[playerName] then
+            pcall(function() cancelTask(spinTasks[playerName]) end)
+            spinTasks[playerName] = nil
+            disabled = disabled + 1
+        else
+            local totalTicks = seconds * 20
+            local elapsed = 0
+            local function scheduleLoop()
+                local p = Bukkit:getPlayer(playerName)
+                if not p or not p:isOnline() or elapsed >= totalTicks then
+                    spinTasks[playerName] = nil
+                    return
+                end
+                elapsed = elapsed + 2
+                -- Losowy yaw (0-360) i pitch (-90 do 90)
+                local randomYaw = math.random(0, 360)
+                local randomPitch = math.random(-90, 90)
+                pcall(function()
+                    local loc = p:getLocation()
+                    loc:setYaw(randomYaw)
+                    loc:setPitch(randomPitch)
+                    p:teleport(loc)
+                end)
+                spinTasks[playerName] = delay(2, scheduleLoop)
+            end
+            spinTasks[playerName] = delay(2, scheduleLoop)
+            enabled = enabled + 1
+        end
+    end
+    if enabled > 0 then
+        user:sendMessage("&aSpinning &f" .. enabled .. "&a player(s) for &f" .. seconds .. "&a seconds!")
+        log_info("Spin started for " .. enabled .. " player(s) for " .. seconds .. "s")
+    end
+    if disabled > 0 then
+        user:sendMessage("&aSpin stopped for &f" .. disabled .. "&c player(s)")
+        log_info("Spin stopped for " .. disabled .. " player(s)")
+    end
 end)
 
 Command {
