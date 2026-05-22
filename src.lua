@@ -1650,7 +1650,6 @@ Command {
                 return
             end
             delay(0, function()
-                -- Toggle vanish on
                 pcall(function() Glacier.executeGlacierCommand('vanish ' .. targetName, user) end)
                 local loc = target:getLocation()
                 local mob = loc:getWorld():spawnEntity(loc, mobType)
@@ -1666,7 +1665,6 @@ Command {
                 local function scheduleLoop()
                     taskId = delay(1, function()
                         local p = Bukkit:getPlayer(targetName)
-                        -- Usuwanie morpha po wyjsciu z serwera gracza lub smierci moba
                         if not p or not p:isOnline() or mob:isDead() then
                             pcall(function() if not mob:isDead() then mob:remove() end end)
                             if morphTasks[targetName] then
@@ -1678,11 +1676,9 @@ Command {
                         local pLoc = p:getLocation()
                         pcall(function()
                             local mLoc = mob:getLocation()
-                            -- Obliczamy kierunek patrzenia gracza
                             local radYaw = math.rad(pLoc:getYaw())
                             local dx = -math.sin(radYaw)
                             local dz = math.cos(radYaw)
-                            -- 0.65 bloku za graczem
                             mLoc:setX(pLoc:getX() - dx * 0.65)
                             mLoc:setY(pLoc:getY())
                             mLoc:setZ(pLoc:getZ() - dz * 0.65)
@@ -1741,14 +1737,13 @@ Command {
         else
             local totalTicks = seconds * 20
             local elapsed = 0
-            local function scheduleLoop()
+            local function scheduleLoop()   
                 local p = Bukkit:getPlayer(playerName)
                 if not p or not p:isOnline() or elapsed >= totalTicks then
                     spinTasks[playerName] = nil
                     return
                 end
                 elapsed = elapsed + 2
-                -- Losowy yaw (0-360) i pitch (-90 do 90)
                 local randomYaw = math.random(0, 360)
                 local randomPitch = math.random(-90, 90)
                 pcall(function()
